@@ -1,0 +1,79 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+*.log
+
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv
+
+# Conda
+.conda/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Mac
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# Model checkpoints (대용량 파일)
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+
+# 결과 이미지 (필요시 주석 해제)
+# Example/테스트이미지_탐지결과/
+# Example/테스트이미지_탐지결과/temp_super_resolution/
+
+# 임시 파일
+temp_super_resolution/
+*.tmp
+*.bak
+*.swp
+*~
+
+# 데이터 파일
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+
+# 로그 파일
+logs/
+*.log
+
+# 캐시
+.cache/
+*.cache

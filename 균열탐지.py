@@ -1,156 +1,259 @@
 '''
-python 균열탐지.py --srx_dir 'Example/테스트이미지' --rst_dir 'Example/테스트이미지_탐지결과' --sr_model_name 'edsr' --crack_config 'model/균열탐지_모델/CrackDetection_config.py' --crack_checkpoint 'model/균열탐지_모델/CrackDetection_CheckPoint.pth' --alpha 0.6 --crack_label 1 --device 'cuda:0'
-'''
-import argparse
-import os
-import cv2
-import numpy as np
-from glob import glob
-from pathlib import Path
+Combined Script: Super Resolution + Crack Detection
 
-# OpenMMLab 라이브러리
+Usage (with default paths):
+    python 균열탐지.py --rgb-to-bgr
+
+Usage (with custom paths):
+    python 균열탐지.py \
+        --img-dir "Example/테스트이미지" \
+        --temp-sr-dir "Example/테스트이미지_탐지결과/temp_super_resolution" \
+        --result-dir "Example/테스트이미지_탐지결과" \
+        --sr-model-name "edsr" \
+        --sr-config "model/초해상화_모델/SuperResolution_config.py" \
+        --sr-checkpoint "model/초해상화_모델/SuperResolution_CheckPoint.pth" \
+        --crack-config "model/균열탐지_모델/CrackDetection_config.py" \
+        --crack-checkpoint "model/균열탐지_모델/CrackDetection_CheckPoint.pth" \
+        --rgb-to-bgr
+'''
+
+import os
+from pickle import TRUE
+os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(pow(2, 40))
+
+import argparse
+from glob import glob
+import shutil
+
+# Super Resolution imports
 from mmagic.apis import MMagicInferencer
+
+# Crack Detection imports
 from mmseg.apis import init_model
 import mmcv
+import numpy as np
+from utils.quantify_seg_results import quantify_crack_width_length
+from torch.cuda import empty_cache
+from utils.utils import inference_segmentor_sliding_window
 
-# 로컬 유틸리티 (필요 시, 이전 코드의 utils.py에서 가져와야 함)
-# 이 파일이 없으면 이 라인을 주석 처리하고, sliding window 추론 부분을 일반 추론으로 변경해야 합니다.
-from utils.utils import inference_segmentor_sliding_window 
 
-# ==============================================================================
-# 상수 정의 (Define Constants)
-# ==============================================================================
-
-# 시각화를 위한 색상 매핑 (BGR 순서)
-# 균열(레이블 1)은 빨간색으로 표시
-color_mapping = {
-    0: [0, 0, 0],       # Class 0: 배경 (검은색)
-    1: [0, 0, 255],     # Class 1: 균열 (빨간색)
-}
-
-# ==============================================================================
-# 인자 파싱 함수 (Argument Parsing Function)
-# ==============================================================================
 def parse_args():
-    """커맨드 라인 인자를 파싱하여 반환합니다."""
-    parser = argparse.ArgumentParser(description='End-to-End Crack Detection Pipeline: Super-Resolution -> Detection -> Visualization')
-
-    # --- 입력 및 출력 경로 인자 ---
-    parser.add_argument('--srx_dir', required=True, help='처리할 원본 이미지가 있는 디렉토리')
-    parser.add_argument('--rst_dir', required=True, help='최종 시각화 결과물을 저장할 디렉토리')
-    parser.add_argument('--srx_suffix', default='.png', help='처리할 원본 이미지의 확장자')
-
-    # --- 1. 초해상화(Super-Resolution) 모델 인자 ---
-    parser.add_argument('--sr_model_name', type=str, default='edsr', help='초해상화에 사용할 MMagic 모델 이름 (예: esrgan, rdn)')
-
-    # --- 2. 균열 탐지(Crack Detection) 모델 인자 ---
-    parser.add_argument('--crack_config', required=True, help='균열 탐지 모델의 설정(config) 파일')
-    parser.add_argument('--crack_checkpoint', required=True, help='균열 탐지 모델의 체크포인트(checkpoint) 파일')
-
-    # --- 3. 시각화(Visualization) 인자 ---
-    parser.add_argument('--alpha', type=float, default=0.6, help='마스크를 이미지에 오버레이할 때의 투명도 값')
-    parser.add_argument('--crack_label', type=int, default=1, help='마스크에서 균열을 나타내는 레이블 인덱스')
+    parser = argparse.ArgumentParser(description='Combined Super Resolution and Crack Detection')
     
-    # --- 공통 인자 ---
-    parser.add_argument('--device', type=str, default='cuda:0', help='추론에 사용할 장치 (예: "cuda:0" 또는 "cpu")')
-
+    # Input/Output directories
+    parser.add_argument('--img-dir', type=str, default='Example/테스트이미지',
+                        help='Input directory containing original images')
+    parser.add_argument('--temp-sr-dir', type=str, default='Example/테스트이미지_탐지결과/temp_super_resolution',
+                        help='Temporary directory for super-resolved images')
+    parser.add_argument('--result-dir', type=str, default='Example/테스트이미지_탐지결과',
+                        help='Final output directory for crack detection results')
+    
+    # Super Resolution parameters
+    parser.add_argument('--sr-model-name', type=str, default='edsr',
+                        help='Super resolution model name')
+    parser.add_argument('--sr-config', type=str, default='model/초해상화_모델/SuperResolution_config.py',
+                        help='Super resolution model config file')
+    parser.add_argument('--sr-checkpoint', type=str, default='model/초해상화_모델/SuperResolution_CheckPoint.pth',
+                        help='Super resolution model checkpoint file')
+    parser.add_argument('--sr-device', type=str, default='cuda',
+                        help='Device for super resolution')
+    
+    # Crack Detection parameters
+    parser.add_argument('--crack-config', type=str, default='model/균열탐지_모델/CrackDetection_config.py',
+                        help='Crack detection model config file')
+    parser.add_argument('--crack-checkpoint', type=str, default='model/균열탐지_모델/CrackDetection_CheckPoint.pth',
+                        help='Crack detection model checkpoint file')
+    parser.add_argument('--crack-device', type=str, default='cuda:0',
+                        help='Device for crack detection')
+    
+    # Output parameters
+    parser.add_argument('--alpha', type=float, default=0.8,
+                        help='Alpha value for blending crack visualization')
+    parser.add_argument('--rgb-to-bgr', action='store_true',
+                        help='Convert RGB to BGR for crack palette')
+    parser.add_argument('--overwrite-crack-palette', action='store_true',
+                        help='Overwrite crack palette with black and red')
+    parser.add_argument('--result-suffix', type=str, default='.JPG',
+                        help='Suffix for result images')
+    parser.add_argument('--mask-suffix', type=str, default='.png',
+                        help='Suffix for mask output')
+    parser.add_argument('--keep-temp-sr', action='store_true',
+                        help='Keep temporary super-resolved images after processing')
+    
+    parser.set_defaults(rgb_to_bgr=False, overwrite_crack_palette=False, keep_temp_sr=False)
+    
     args = parser.parse_args()
     return args
 
-# ==============================================================================
-# 메인 실행 함수 (Main Function)
-# ==============================================================================
-def main():
-    """메인 파이프라인을 실행합니다."""
-    args = parse_args()
 
-    # --- 디렉토리 설정 ---
-    # 최종 결과물 외에, 중간 과정(초해상도, 마스크)을 저장할 임시 디렉토리 생성
-    sr_output_dir = os.path.join(args.rst_dir, 'temp_super_resolution')
-    Path(args.rst_dir).mkdir(parents=True, exist_ok=True)
-    Path(sr_output_dir).mkdir(parents=True, exist_ok=True)
+def super_resolution_step(args):
+    """
+    Step 1: Apply super resolution to all images in the input directory
+    """
+    print("\n" + "="*80)
+    print("STEP 1: Super Resolution Processing")
+    print("="*80)
     
-    print(f"1. 모델을 초기화합니다...")
-    # 1. 초해상화 모델 초기화
-    sr_inferencer = MMagicInferencer(model_name=args.sr_model_name, device=args.device)
+    # Create temporary directory for super-resolved images
+    os.makedirs(args.temp_sr_dir, exist_ok=True)
     
-    # 2. 균열 탐지 모델 초기화
-    crack_model = init_model(args.crack_config, args.crack_checkpoint, device=args.device)
-    print("모델 초기화 완료.")
-
-    # --- 입력 이미지 목록 가져오기 ---
-    img_list = glob(os.path.join(args.srx_dir, f'*{args.srx_suffix}'))
-    if not img_list:
-        print(f"오류: '{args.srx_dir}' 디렉토리에서 '{args.srx_suffix}' 확장자를 가진 이미지를 찾을 수 없습니다.")
-        return
+    # Initialize super resolution inferencer
+    print(f"Initializing super resolution model: {args.sr_model_name}")
+    sr_inferencer = MMagicInferencer(
+        model_name=args.sr_model_name,
+        model_config=args.sr_config,
+        model_ckpt=args.sr_checkpoint,
+        device=args.sr_device
+    )
+    
+    # Get list of images to process
+    img_list = []
+    for ext in ['.png', '.jpg', '.jpeg', '.JPG', '.PNG', '.JPEG']:
+        img_list.extend(glob(os.path.join(args.img_dir, f'*{ext}')))
+    
+    print(f"Found {len(img_list)} images to process")
+    
+    # Process each image
+    for idx, img_path in enumerate(img_list, 1):
+        img_name = os.path.basename(img_path)
+        # Change extension to .png for super-resolved images
+        sr_img_name = os.path.splitext(img_name)[0] + '.png'
+        output_path = os.path.join(args.temp_sr_dir, sr_img_name)
         
-    print(f"총 {len(img_list)}개의 이미지를 처리합니다.")
-
-    # --- 각 이미지에 대해 파이프라인 실행 ---
-    for img_path in img_list:
-        base_name = os.path.basename(img_path)
-        print(f"\n--- [{base_name}] 처리 시작 ---")
-
-        # ==========================
-        # 단계 1: 초해상화 (Super-Resolution)
-        # ==========================
-        print(f"  [1/3] 초해상화 진행 중...")
-        sr_img_path = os.path.join(sr_output_dir, base_name)
-        sr_inferencer.infer(img=img_path, result_out_dir=sr_output_dir)
-        # MMagicInferencer는 원본 파일명으로 저장하므로, 저장된 경로를 다시 확인합니다.
+        print(f"[{idx}/{len(img_list)}] Processing: {img_name}")
         
-        # 초해상화된 이미지 로드
-        sr_image = cv2.imread(sr_img_path)
-        if sr_image is None:
-            print(f"    경고: 초해상화된 이미지 파일을 읽는 데 실패했습니다: {sr_img_path}")
-            continue
+        # Run super resolution
+        sr_inferencer.infer(
+            img=img_path,
+            result_out_dir=output_path
+        )
+        
+        # Clear GPU cache
+        empty_cache()
+    
+    print(f"Super resolution complete. Results saved to: {args.temp_sr_dir}\n")
+    return len(img_list)
 
-        # ==========================
-        # 단계 2: 균열 탐지 (Crack Detection)
-        # ==========================
-        print(f"  [2/3] 균열 탐지 진행 중...")
-        # Sliding window 방식으로 추론하여 메모리 부족 문제 방지
+
+def crack_detection_step(args):
+    """
+    Step 2: Apply crack detection to super-resolved images
+    """
+    print("\n" + "="*80)
+    print("STEP 2: Crack Detection Processing")
+    print("="*80)
+    
+    # Create output directory
+    os.makedirs(args.result_dir, exist_ok=True)
+    
+    # Initialize crack detection model
+    print("Initializing crack detection model...")
+    crack_model = init_model(args.crack_config, args.crack_checkpoint, device=args.crack_device)
+    
+    # Get list of super-resolved images
+    img_list = glob(os.path.join(args.temp_sr_dir, '*.png'))
+    print(f"Found {len(img_list)} super-resolved images to analyze")
+    
+    # Setup crack palette
+    crack_palette = crack_model.dataset_meta['palette'][:2]
+    if args.rgb_to_bgr:
+        crack_palette = [p[::-1] for p in crack_palette]
+    if args.overwrite_crack_palette:
+        crack_palette[1] = [0, 0, 255]
+    
+    # Process each super-resolved image
+    for idx, img_path in enumerate(img_list, 1):
+        img_name = os.path.basename(img_path)
+        print(f"[{idx}/{len(img_list)}] Detecting cracks: {img_name}")
+        
+        # Run crack detection
         _, crack_mask = inference_segmentor_sliding_window(
             crack_model, 
-            sr_img_path, 
+            img_path, 
             color_mask=None, 
-            score_thr=0.5,
+            score_thr=0.5, 
             window_size=1024, 
-            overlap_ratio=1
-        )
-
-        # ==========================
-        # 단계 3: 시각화 및 저장 (Visualization & Save)
-        # ==========================
-        print(f"  [3/3] 결과 시각화 및 저장 중...")
-        
-        # 3-1. 균열 마스크를 RGB 색상 마스크로 변환
-        gt_rgb = np.zeros((crack_mask.shape[0], crack_mask.shape[1], 3), dtype=np.uint8)
-        gt_rgb[crack_mask == args.crack_label] = color_mapping[args.crack_label]
-        
-        # 3-2. 원본(초해상화된) 이미지에 색상 마스크 오버레이
-        mask_bool = np.sum(gt_rgb, axis=2) > 0
-        combined_img = sr_image.copy()
-        combined_img[mask_bool] = cv2.addWeighted(
-            combined_img[mask_bool], 1 - args.alpha, 
-            gt_rgb[mask_bool], args.alpha, 
-            0
+            overlap_ratio=0.5
         )
         
-        # 3-3. [오버레이 이미지]와 [색상 마스크]를 나란히 붙여 최종 결과물 생성
-        combined_side_by_side = np.hstack((combined_img, gt_rgb))
+        # Load original image
+        seg_result = mmcv.imread(img_path)
+        
+        # Visualize crack mask
+        color = np.array(crack_palette[1], dtype=np.uint8)
+        mask_bool = crack_mask == 1
+        seg_result[mask_bool, :] = seg_result[mask_bool, :] * (1 - args.alpha) + color * args.alpha
+        
+        # Prepare output names
+        base_name = os.path.splitext(img_name)[0]
+        rst_name = base_name + args.result_suffix
+        mask_name = base_name + args.mask_suffix
+        
+        # Quantify crack width and length
+        seg_result = quantify_crack_width_length(seg_result, crack_mask, crack_palette[1])
+        
+        # Save results
+        rst_path = os.path.join(args.result_dir, rst_name)
+        mask_path = os.path.join(args.result_dir, mask_name)
+        
+        mmcv.imwrite(seg_result, rst_path)
+        mmcv.imwrite(crack_mask.astype(np.uint8), mask_path)
+        
+        # Clear GPU cache
+        empty_cache()
+    
+    print(f"Crack detection complete. Results saved to: {args.result_dir}\n")
+    return len(img_list)
 
-        # 3-4. 최종 결과물 저장
-        output_filename = os.path.join(args.rst_dir, base_name)
-        cv2.imwrite(output_filename, combined_side_by_side)
-        print(f"    -> 최종 결과 저장 완료: {output_filename}")
 
-    print("\n모든 작업이 완료되었습니다.")
-    print(f"최종 결과는 '{args.rst_dir}' 디렉토리에 저장되었습니다.")
+def cleanup_temp_files(args):
+    """
+    Step 3: Clean up temporary super-resolved images if requested
+    """
+    if not args.keep_temp_sr and os.path.exists(args.temp_sr_dir):
+        print("\n" + "="*80)
+        print("STEP 3: Cleaning up temporary files")
+        print("="*80)
+        print(f"Removing temporary directory: {args.temp_sr_dir}")
+        shutil.rmtree(args.temp_sr_dir)
+        print("Cleanup complete.\n")
+    elif args.keep_temp_sr:
+        print(f"\nTemporary super-resolved images kept at: {args.temp_sr_dir}\n")
 
 
-# ==============================================================================
-# 스크립트 실행 지점 (Script Entry Point)
-# ==============================================================================
+def main():
+    args = parse_args()
+    
+    print("\n" + "="*80)
+    print("COMBINED CRACK DETECTION PIPELINE")
+    print("="*80)
+    print(f"Input directory:  {args.img_dir}")
+    print(f"Temp SR directory: {args.temp_sr_dir}")
+    print(f"Output directory: {args.result_dir}")
+    print("="*80 + "\n")
+    
+    try:
+        # Step 1: Super Resolution
+        num_images = super_resolution_step(args)
+        
+        # Step 2: Crack Detection
+        num_processed = crack_detection_step(args)
+        
+        # Step 3: Cleanup (if requested)
+        cleanup_temp_files(args)
+        
+        # Final summary
+        print("\n" + "="*80)
+        print("PIPELINE COMPLETED SUCCESSFULLY!")
+        print("="*80)
+        print(f"Total images processed: {num_images}")
+        print(f"Results available at: {args.result_dir}")
+        print("="*80 + "\n")
+        
+    except Exception as e:
+        print(f"\n[ERROR] Pipeline failed: {str(e)}")
+        raise
+
+
 if __name__ == '__main__':
     main()
